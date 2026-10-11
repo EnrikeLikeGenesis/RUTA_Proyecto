@@ -19,12 +19,14 @@ class LocationService {
 
     if (permission == LocationPermission.deniedForever) {
       throw Exception(
-          'Permiso de ubicación denegado permanentemente. Habilitalo desde los ajustes del teléfono.');
+        'Permiso de ubicación denegado permanentemente. Habilitalo desde los ajustes del teléfono.',
+      );
     }
-
+    //tiempo maximo para obtener una posicion
     return await Geolocator.getCurrentPosition(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
+        timeLimit: Duration(seconds: 20),
       ),
     );
   }
