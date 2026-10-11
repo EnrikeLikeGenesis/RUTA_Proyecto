@@ -96,13 +96,13 @@ class IntroScreen extends StatelessWidget {
                           );
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: celeste,
+                          backgroundColor: const Color(0xFF58B5F5),
                           foregroundColor: Colors.white,
                           elevation: 0,
                           shape: const StadiumBorder(),
                         ),
                         child: const Text(
-                          'Iniciar sesión',
+                          'Comenzar',
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
