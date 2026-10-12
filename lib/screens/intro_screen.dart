@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
-import '../providers/auth_provider.dart';
 import 'auth/login_screen.dart';
-import 'auth/register_screen.dart';
 
 class IntroScreen extends StatelessWidget {
   const IntroScreen({super.key});
@@ -84,6 +81,7 @@ class IntroScreen extends StatelessWidget {
 
                     const SizedBox(height: 36),
 
+                    // Único botón de la pantalla
                     SizedBox(
                       width: double.infinity,
                       height: 58,
@@ -96,7 +94,7 @@ class IntroScreen extends StatelessWidget {
                           );
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF58B5F5),
+                          backgroundColor: celeste,
                           foregroundColor: Colors.white,
                           elevation: 0,
                           shape: const StadiumBorder(),
@@ -109,48 +107,6 @@ class IntroScreen extends StatelessWidget {
                           ),
                         ),
                       ),
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    SizedBox(
-                      width: double.infinity,
-                      height: 58,
-                      child: OutlinedButton(
-                        onPressed: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const RegisterScreen(),
-                            ),
-                          );
-                        },
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: celeste,
-                          side: const BorderSide(color: celeste, width: 2),
-                          shape: const StadiumBorder(),
-                        ),
-                        child: const Text(
-                          'Registrarse',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    TextButton.icon(
-                      onPressed: () {
-                        context.read<AuthProvider>().continueAsGuest();
-                      },
-                      icon: const Icon(Icons.person_outline),
-                      label: const Text(
-                        'Continuar como invitado',
-                        style: TextStyle(fontSize: 16),
-                      ),
-                      style: TextButton.styleFrom(foregroundColor: azul),
                     ),
                   ],
                 ),
