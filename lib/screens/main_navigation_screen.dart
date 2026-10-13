@@ -20,18 +20,18 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   static const _mapaIndex = 1;
   int _index = _mapaIndex;
 
-  /// Punto que el usuario marcó tocando el mapa, pendiente de usarse en
-  /// la pestaña "Rutas". Cada vez que cambia se fuerza la recreación de
-  /// [RouteDistanceScreen] (vía [_markedPointVersion]) para que le
-  /// vuelva a preguntar al usuario cómo quiere usarlo.
+  /// Punto y propósito seleccionados desde el mapa, pendientes de usarse
+  /// en la pestaña "Rutas".
   LatLng? _markedPoint;
+  bool _markedPointAsDestination = true;
   int _markedPointVersion = 0;
 
   void _goToTab(int index) => setState(() => _index = index);
 
-  void _onMapPointMarked(LatLng point) {
+  void _onMapPointMarked(LatLng point, bool asDestination) {
     setState(() {
       _markedPoint = point;
+      _markedPointAsDestination = asDestination;
       _markedPointVersion++;
       _index = 2;
     });
@@ -50,6 +50,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       RouteDistanceScreen(
         key: ValueKey('route-$_markedPointVersion'),
         initialMarkedPoint: _markedPoint,
+        initialMarkedPointAsDestination: _markedPointAsDestination,
       ),
     ];
 

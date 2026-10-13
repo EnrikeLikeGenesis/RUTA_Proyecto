@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
+import '../../config/report_categories.dart';
 import '../../models/report_point.dart';
 import '../../services/report_service.dart';
 
@@ -27,15 +28,8 @@ class _CreateReportScreenState extends State<CreateReportScreen> {
   final _formKey = GlobalKey<FormState>();
   final ReportService _reportService = ReportService();
 
-  String _category = 'general';
+  String _category = 'baches';
   bool _isSaving = false;
-
-  final List<Map<String, String>> _categories = const [
-    {'value': 'general', 'label': 'General'},
-    {'value': 'peligro', 'label': 'Peligro'},
-    {'value': 'transito', 'label': 'Tránsito'},
-    {'value': 'evento', 'label': 'Evento'},
-  ];
 
   @override
   void initState() {
@@ -119,12 +113,16 @@ class _CreateReportScreenState extends State<CreateReportScreen> {
                   labelText: 'Categoría',
                   border: OutlineInputBorder(),
                 ),
-                items: _categories
-                    .map((c) => DropdownMenuItem(
-                          value: c['value'],
-                          child: Text(c['label']!),
-                        ))
-                    .toList(),
+                items: [
+                  ...reportCategories.map(
+                    (category) => DropdownMenuItem(
+                      value: category.value,
+                      child: Text(category.label),
+                    ),
+                  ),
+                  if (reportCategoryFor(_category) == null)
+                    DropdownMenuItem(value: _category, child: Text(_category)),
+                ],
                 onChanged: (value) {
                   if (value != null) setState(() => _category = value);
                 },

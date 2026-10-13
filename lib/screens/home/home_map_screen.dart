@@ -5,6 +5,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../config/proximity_config.dart';
+import '../../config/report_categories.dart';
 import '../../models/report_point.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/map_layer_provider.dart';
@@ -31,7 +32,7 @@ class HomeMapScreen extends StatefulWidget {
   /// Se llama cuando el usuario toca un punto del mapa para usarlo como
   /// parte de una ruta. La pantalla contenedora debe guardar el punto y
   /// cambiar a la pestaña "Rutas".
-  final ValueChanged<LatLng>? onMapPointMarked;
+  final void Function(LatLng point, bool asDestination)? onMapPointMarked;
 
   const HomeMapScreen({
     super.key,
@@ -127,31 +128,56 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
     setState(() => _reports = reports);
   }
 
-  /// Se llama al tocar el mapa. Ya no crea un reporte: marca el punto
-  /// tocado como parte de una ruta y le pide a la pantalla contenedora
-  /// que cambie a la pestaña "Rutas", donde el usuario elige si lo usa
-  /// como destino (ruta B, saliendo desde su ubicación actual) o como
-  /// punto de partida (ruta A, escribiendo el destino a mano).
-  void _handleMapTap(LatLng point) {
-    if (widget.onMapPointMarked == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Punto marcado. Elegí cómo usarlo en tu ruta.'),
-        duration: Duration(seconds: 2),
+  Future<void> _handleMapTap(LatLng point) async {
+    final isWithinProximity = Geolocator.distanceBetween(
+          _currentPosition!.latitude,
+          _currentPosition!.longitude,
+          point.latitude,
+          point.longitude,
+        ) <=
+        ProximityConfig.alertRadiusMeters;
+    final canCreateReport =
+        isWithinProximity && !widget.isGuest && widget.userId != null;
+
+    final action = await showModalBottomSheet<_MapPointAction>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canCreateReport)
+              ListTile(
+                leading: const Icon(Icons.add_location_alt),
+                title: const Text('Crear reporte'),
+                onTap: () => Navigator.of(sheetContext)
+                    .pop(_MapPointAction.createReport),
+              ),
+            ListTile(
+              leading: const Icon(Icons.flag_outlined),
+              title: const Text('Como punto de destino'),
+              onTap: () => Navigator.of(sheetContext)
+                  .pop(_MapPointAction.destination),
+            ),
+            ListTile(
+              leading: const Icon(Icons.trip_origin),
+              title: const Text('Como punto de partida'),
+              onTap: () =>
+                  Navigator.of(sheetContext).pop(_MapPointAction.origin),
+            ),
+          ],
+        ),
       ),
     );
-    widget.onMapPointMarked!(point);
-  }
 
-  /// Mantener presionado el mapa: solo los usuarios admin pueden crear un
-  /// reporte en cualquier punto (no hace falta estar parado ahí). Para el
-  /// resto de los usuarios (incluidos invitados) el gesto no hace nada,
-  /// para no pisar el uso normal del mapa (arrastrar/zoom).
-  void _handleMapLongPress(LatLng point) {
-    if (widget.isGuest || widget.userId == null) return;
-    final authProvider = context.read<AuthProvider>();
-    if (!authProvider.isAdmin) return;
-    _handleCreateReport(point);
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _MapPointAction.createReport:
+        await _handleCreateReport(point);
+      case _MapPointAction.destination:
+        widget.onMapPointMarked?.call(point, true);
+      case _MapPointAction.origin:
+        widget.onMapPointMarked?.call(point, false);
+    }
   }
 
   Future<void> _handleCreateReport(LatLng position) async {
@@ -412,6 +438,20 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
     );
   }
 
+  Widget _reportMarker(String category) {
+    final reportCategory = reportCategoryFor(category);
+    if (reportCategory == null) {
+      return const Icon(Icons.location_on, color: Colors.red, size: 36);
+    }
+
+    return Image.asset(
+      reportCategory.markerAsset,
+      width: 40,
+      height: 40,
+      fit: BoxFit.contain,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -608,8 +648,9 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
       options: MapOptions(
         initialCenter: _currentPosition!,
         initialZoom: 15,
-        onTap: (tapPosition, point) => _handleMapTap(point),
-        onLongPress: (tapPosition, point) => _handleMapLongPress(point),
+        onTap: (tapPosition, point) {
+          if (_currentPosition != null) _handleMapTap(point);
+        },
       ),
       children: [
         buildMapTileLayer(mapType: mapType, isDark: isDark),
@@ -645,11 +686,7 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
                 height: 40,
                 child: GestureDetector(
                   onTap: () => _showReportDetails(report),
-                  child: const Icon(
-                    Icons.location_on,
-                    color: Colors.red,
-                    size: 36,
-                  ),
+                  child: _reportMarker(report.category),
                 ),
               ),
             ),
@@ -674,3 +711,5 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
     );
   }
 }
+
+enum _MapPointAction { createReport, destination, origin }
