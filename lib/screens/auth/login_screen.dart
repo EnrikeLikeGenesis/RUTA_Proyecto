@@ -30,25 +30,30 @@ class _LoginScreenState extends State<LoginScreen> {
     0xFFF7FCFF,
   ); // Relleno suave de campos
 
+  //verifica los datos ingresados y permite entrar a la app si son correctos.
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
 
     final authProvider = context.read<AuthProvider>();
+
     final success = await authProvider.signIn(
       _emailController.text.trim(),
       _passwordController.text,
     );
 
-    if (!success && mounted) {
+    if (!mounted) return;
+
+    if (!success) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(authProvider.errorMessage ?? 'Error al iniciar sesión'),
           backgroundColor: Colors.redAccent,
         ),
       );
+    } else {
+      Navigator.of(context).popUntil((route) => route.isFirst);
     }
-    // Si success es true, el listener de AuthProvider actualiza el estado
-    // y el widget raíz (main.dart) navega automáticamente a la app.
+    //
   }
 
   InputDecoration _buildInputDecoration({
