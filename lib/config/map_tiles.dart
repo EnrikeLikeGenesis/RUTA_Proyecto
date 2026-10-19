@@ -3,7 +3,7 @@ class MapTiles {
   MapTiles._();
 
   /// Identifica a la app ante los proveedores de mapas.
-  static const String userAgentPackageName = 'com.example.ruta';
+  static const String userAgentPackageName = 'com.example.prueba_flutter';
 
   // --- Estándar ---------------------------------------------------------
   /// Capa clara (OpenStreetMap estándar).
@@ -19,7 +19,8 @@ class MapTiles {
   /// Capa de relieve/topográfica (OpenTopoMap), gratuita y sin API key.
   /// No existe una versión oscura propia de este proveedor: en modo
   /// oscuro se oscurecen las mismas teselas con un velo semitransparente.
-  static const String terrain = 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png';
+  static const String terrain =
+      'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png';
 
   static const List<String> terrainSubdomains = ['a', 'b', 'c'];
 

@@ -1,11 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../config/proximity_config.dart';
 import '../../config/report_categories.dart';
+import '../../l10n/app_text.dart';
 import '../../models/report_point.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/map_layer_provider.dart';
@@ -14,8 +18,8 @@ import '../../services/location_service.dart';
 import '../../services/notification_service.dart';
 import '../../services/report_service.dart';
 import '../../widgets/map_tile_layer.dart';
+import '../../widgets/user_avatar_button.dart';
 import '../report/create_report_screen.dart';
-import '../settings/settings_screen.dart';
 
 class HomeMapScreen extends StatefulWidget {
   /// Null cuando se navega como invitado.
@@ -47,14 +51,20 @@ class HomeMapScreen extends StatefulWidget {
 }
 
 class _HomeMapScreenState extends State<HomeMapScreen> {
+  static const LatLng _defaultMapCenter = LatLng(-34.6037, -58.3816);
+
   final LocationService _locationService = LocationService();
   final ReportService _reportService = ReportService();
   final MapController _mapController = MapController();
 
   LatLng? _currentPosition;
+  LatLng _mapCenter = _defaultMapCenter;
   List<ReportPoint> _reports = [];
+  bool _mapReady = false;
   bool _isLoading = true;
-  String? _errorMessage;
+  String? _locationErrorMessage;
+  String? _reportsErrorMessage;
+  int _reportRequestGeneration = 0;
 
   /// Marcador local que puede dejar un invitado. No se guarda en el
   /// servidor, es solo una referencia visual sobre el mapa.
@@ -95,10 +105,19 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
     );
 
     if (distanceInMeters <= ProximityConfig.alertRadiusMeters) {
+      if (mounted && context.read<ThemeProvider>().communityNotifications) {
+      final isEnglish =
+          Localizations.localeOf(context).languageCode == 'en';
       NotificationService.instance.showNearbyReportNotification(
-        title: 'Se creó un reporte cerca tuyo',
-        body: '${report.title} · a ${distanceInMeters.round()} m de tu ubicación',
+        title: isEnglish
+            ? 'A report was created near you'
+            : 'Se creó un reporte cerca tuyo',
+        body: isEnglish
+            ? '${report.title} · ${distanceInMeters.round()} m from your location'
+            : '${report.title} · a ${distanceInMeters.round()} m de tu ubicación',
+        isEnglish: isEnglish,
       );
+      }
       _loadNearbyReports();
     }
   }
@@ -106,14 +125,49 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
   Future<void> _initLocationAndReports() async {
     setState(() {
       _isLoading = true;
-      _errorMessage = null;
+      _locationErrorMessage = null;
+      _reportsErrorMessage = null;
     });
     try {
-      final position = await _locationService.getCurrentPosition();
-      _currentPosition = LatLng(position.latitude, position.longitude);
-      await _loadNearbyReports();
+      final lastKnownPosition = await _locationService.getLastKnownPosition();
+      if (lastKnownPosition != null && mounted) {
+        final cachedPosition = LatLng(
+          lastKnownPosition.latitude,
+          lastKnownPosition.longitude,
+        );
+        setState(() {
+          _currentPosition = cachedPosition;
+          _mapCenter = cachedPosition;
+          _isLoading = false;
+        });
+        if (_mapReady) _mapController.move(cachedPosition, 15);
+        unawaited(_loadNearbyReports());
+      }
+
+      final position = await _locationService.getCurrentPosition(
+        accuracy: LocationAccuracy.medium,
+        timeLimit: const Duration(seconds: 10),
+        isEnglish: Localizations.localeOf(context).languageCode == 'en',
+      );
+      final currentPosition = LatLng(position.latitude, position.longitude);
+      if (!mounted) return;
+      final shouldReloadReports =
+          _currentPosition == null ||
+          Geolocator.distanceBetween(
+                _currentPosition!.latitude,
+                _currentPosition!.longitude,
+                currentPosition.latitude,
+                currentPosition.longitude,
+              ) >
+              250;
+      setState(() {
+        _currentPosition = currentPosition;
+        _mapCenter = currentPosition;
+      });
+      if (_mapReady) _mapController.move(currentPosition, 15);
+      if (shouldReloadReports) unawaited(_loadNearbyReports());
     } catch (e) {
-      _errorMessage = e.toString();
+      if (mounted) setState(() => _locationErrorMessage = e.toString());
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -121,21 +175,35 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
 
   Future<void> _loadNearbyReports() async {
     if (_currentPosition == null) return;
-    final reports = await _reportService.getNearbyReports(
-      latitude: _currentPosition!.latitude,
-      longitude: _currentPosition!.longitude,
-    );
-    setState(() => _reports = reports);
+    final generation = ++_reportRequestGeneration;
+    final position = _currentPosition!;
+    try {
+      final reports = await _reportService.getNearbyReports(
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+      if (!mounted || generation != _reportRequestGeneration) return;
+      setState(() {
+        _reports = reports;
+        _reportsErrorMessage = null;
+      });
+    } catch (e) {
+      if (mounted && generation == _reportRequestGeneration) {
+        setState(() => _reportsErrorMessage = e.toString());
+      }
+    }
   }
 
   Future<void> _handleMapTap(LatLng point) async {
-    final isWithinProximity = Geolocator.distanceBetween(
-          _currentPosition!.latitude,
-          _currentPosition!.longitude,
-          point.latitude,
-          point.longitude,
-        ) <=
-        ProximityConfig.alertRadiusMeters;
+    final isWithinProximity =
+        _currentPosition != null &&
+        Geolocator.distanceBetween(
+              _currentPosition!.latitude,
+              _currentPosition!.longitude,
+              point.latitude,
+              point.longitude,
+            ) <=
+            ProximityConfig.alertRadiusMeters;
     final canCreateReport =
         isWithinProximity && !widget.isGuest && widget.userId != null;
 
@@ -148,19 +216,24 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
             if (canCreateReport)
               ListTile(
                 leading: const Icon(Icons.add_location_alt),
-                title: const Text('Crear reporte'),
-                onTap: () => Navigator.of(sheetContext)
-                    .pop(_MapPointAction.createReport),
+                title: Text(appText(context, 'Crear reporte', 'Create report')),
+                onTap: () =>
+                    Navigator.of(sheetContext)
+                        .pop(_MapPointAction.createReport),
               ),
             ListTile(
               leading: const Icon(Icons.flag_outlined),
-              title: const Text('Como punto de destino'),
-              onTap: () => Navigator.of(sheetContext)
-                  .pop(_MapPointAction.destination),
+              title: Text(
+                appText(context, 'Como punto de destino', 'Set as destination'),
+              ),
+              onTap: () =>
+                  Navigator.of(sheetContext).pop(_MapPointAction.destination),
             ),
             ListTile(
               leading: const Icon(Icons.trip_origin),
-              title: const Text('Como punto de partida'),
+              title: Text(
+                appText(context, 'Como punto de partida', 'Set as starting point'),
+              ),
               onTap: () =>
                   Navigator.of(sheetContext).pop(_MapPointAction.origin),
             ),
@@ -187,10 +260,8 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
     }
     final created = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => CreateReportScreen(
-          position: position,
-          userId: widget.userId!,
-        ),
+        builder: (_) =>
+            CreateReportScreen(position: position, userId: widget.userId!),
       ),
     );
     if (created == true) {
@@ -201,12 +272,15 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
   /// Un invitado puede marcar una ubicación en el mapa a modo de
   /// referencia personal, pero esa marca nunca se envía como reporte.
   void _handleGuestMark(LatLng position) {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     setState(() => _guestMarker = position);
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
+      SnackBar(
         content: Text(
-          'Ubicación marcada. Como invitado no podés crear reportes: '
-          'iniciá sesión para reportar.',
+          isEnglish
+              ? 'Location marked. Guests cannot create reports; sign in to report.'
+              : 'Ubicación marcada. Como invitado no podés crear reportes: '
+                  'iniciá sesión para reportar.',
         ),
         duration: Duration(seconds: 3),
       ),
@@ -229,19 +303,24 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
   }
 
   Future<void> _handleDeleteReport(ReportPoint report) async {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     final confirm = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Eliminar reporte'),
-        content: Text('¿Seguro que querés eliminar "${report.title}"?'),
+        title: Text(appText(context, 'Eliminar reporte', 'Delete report')),
+        content: Text(
+          isEnglish
+              ? 'Are you sure you want to delete "${report.title}"?'
+              : '¿Seguro que querés eliminar "${report.title}"?',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancelar'),
+            child: Text(appText(context, 'Cancelar', 'Cancel')),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Eliminar'),
+            child: Text(appText(context, 'Eliminar', 'Delete')),
           ),
         ],
       ),
@@ -254,81 +333,131 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
       await _loadNearbyReports();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error al eliminar: $e')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(
+              SnackBar(
+                content: Text(
+                  isEnglish ? 'Could not delete: $e' : 'Error al eliminar: $e',
+                ),
+              ),
+            );
       }
     }
   }
 
   void _showReportDetails(ReportPoint report) {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     final authProvider = context.read<AuthProvider>();
     final isOwnReport = !widget.isGuest && report.userId == widget.userId;
-    final canManage = !widget.isGuest &&
+    final canManage =
+        !widget.isGuest &&
         (authProvider.isAdmin || report.userId == widget.userId);
-    final authorLabel =
-        isOwnReport ? 'Mi reporte' : (report.username ?? 'Usuario');
+    final authorLabel = isOwnReport
+        ? appText(context, 'Mi reporte', 'My report')
+        : (report.username ?? appText(context, 'Usuario', 'User'));
 
     showModalBottomSheet(
       context: context,
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(report.title, style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Chip(label: Text(report.category)),
-                const SizedBox(width: 8),
-                Icon(Icons.person_outline,
-                    size: 16, color: Theme.of(context).colorScheme.outline),
-                const SizedBox(width: 4),
-                Text(
-                  authorLabel,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontWeight:
-                            isOwnReport ? FontWeight.bold : FontWeight.normal,
-                      ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (report.description.isNotEmpty) Text(report.description),
-            const SizedBox(height: 12),
-            Text(
-              'Creado: ${report.createdAt.toLocal()}',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            if (canManage) ...[
-              const SizedBox(height: 16),
+      isScrollControlled: true,
+      builder: (_) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(report.title, style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 4),
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).pop(); // cierra el bottom sheet
-                        _handleEditReport(report);
-                      },
-                      icon: const Icon(Icons.edit),
-                      label: const Text('Editar'),
-                    ),
+                  Chip(label: Text(reportCategoryText(context, report.category))),
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.person_outline,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.outline,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _handleDeleteReport(report),
-                      style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
-                      icon: const Icon(Icons.delete),
-                      label: const Text('Eliminar'),
+                  const SizedBox(width: 4),
+                  Text(
+                    authorLabel,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      fontWeight: isOwnReport
+                          ? FontWeight.bold
+                          : FontWeight.normal,
                     ),
                   ),
                 ],
               ),
+              if (report.imageUrl != null) ...[
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    report.imageUrl!,
+                    width: double.infinity,
+                    height: 220,
+                    fit: BoxFit.cover,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) return child;
+                      return const SizedBox(
+                        height: 220,
+                        child: Center(child: CircularProgressIndicator()),
+                      );
+                    },
+                    errorBuilder: (_, _, _) => Container(
+                      height: 220,
+                      alignment: Alignment.center,
+                      color: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHighest,
+                      child: Text(
+                        appText(
+                          context,
+                          'No se pudo cargar la imagen',
+                          'Could not load image',
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              if (report.description.isNotEmpty) Text(report.description),
+              const SizedBox(height: 12),
+              Text(
+                '${isEnglish ? 'Created' : 'Creado'}: ${report.createdAt.toLocal()}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              if (canManage) ...[
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).pop(); // cierra el bottom sheet
+                          _handleEditReport(report);
+                        },
+                        icon: const Icon(Icons.edit),
+                        label: Text(appText(context, 'Editar', 'Edit')),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => _handleDeleteReport(report),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red,
+                        ),
+                        icon: const Icon(Icons.delete),
+                        label: Text(appText(context, 'Eliminar', 'Delete')),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -350,18 +479,21 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
   }
 
   void _showSosInfo() {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('¿Necesitás ayuda?'),
-        content: const Text(
-          'Ante una emergencia, comunicate con los servicios de '
-          'emergencia de tu zona (por ejemplo, 911 en Argentina).',
+        title: Text(appText(context, '¿Necesitás ayuda?', 'Need help?')),
+        content: Text(
+          isEnglish
+              ? 'In an emergency, contact your local emergency services.'
+              : 'Ante una emergencia, comunicate con los servicios de '
+                  'emergencia de tu zona (por ejemplo, 911 en Argentina).',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Entendido'),
+            child: Text(appText(context, 'Entendido', 'Got it')),
           ),
         ],
       ),
@@ -369,6 +501,7 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
   }
 
   void _showMapTypeSheet() {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     final mapLayerProvider = context.read<MapLayerProvider>();
     showModalBottomSheet(
       context: context,
@@ -377,11 +510,14 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Tipo de mapa', style: TextStyle(fontWeight: FontWeight.bold)),
+                  child: Text(
+                    isEnglish ? 'Map type' : 'Tipo de mapa',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
               _buildMapTypeTile(
@@ -389,24 +525,28 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
                 provider: mapLayerProvider,
                 type: MapLayerType.standard,
                 icon: Icons.map_outlined,
-                label: 'Estándar',
-                subtitle: 'Con modo claro y oscuro',
+                label: isEnglish ? 'Standard' : 'Estándar',
+                subtitle: isEnglish
+                    ? 'With light and dark mode'
+                    : 'Con modo claro y oscuro',
               ),
               _buildMapTypeTile(
                 sheetContext: sheetContext,
                 provider: mapLayerProvider,
                 type: MapLayerType.terrain,
                 icon: Icons.terrain,
-                label: 'Relieve',
-                subtitle: 'Con modo claro y oscuro',
+                label: isEnglish ? 'Terrain' : 'Relieve',
+                subtitle: isEnglish
+                    ? 'With light and dark mode'
+                    : 'Con modo claro y oscuro',
               ),
               _buildMapTypeTile(
                 sheetContext: sheetContext,
                 provider: mapLayerProvider,
                 type: MapLayerType.satellite,
                 icon: Icons.satellite_alt,
-                label: 'Satélite',
-                subtitle: 'Misma imagen siempre',
+                label: isEnglish ? 'Satellite' : 'Satélite',
+                subtitle: isEnglish ? 'Same imagery always' : 'Misma imagen siempre',
               ),
               const SizedBox(height: 8),
             ],
@@ -458,13 +598,77 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
       body: Stack(
         children: [
           _buildBody(),
-          if (!_isLoading && _errorMessage == null) ...[
-            _buildTopBar(context),
-            _buildSosButton(context),
-            _buildRightButtons(context),
-            _buildReportButton(context),
-          ],
+          _buildTopBar(context),
+          _buildSosButton(context),
+          _buildRightButtons(context),
+          _buildReportButton(context),
+          if (_locationErrorMessage != null || _reportsErrorMessage != null)
+            Positioned(
+              left: 16,
+              right: 16,
+              top: MediaQuery.paddingOf(context).top + 76,
+              child: _buildLoadErrorCard(),
+            ),
+          if (_isLoading)
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: LinearProgressIndicator(minHeight: 2),
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildLoadErrorCard() {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
+    final locationFailed = _locationErrorMessage != null;
+    final message = locationFailed
+        ? (isEnglish
+              ? 'Could not get your location. The map is available; move it or retry.'
+              : 'No se pudo obtener tu ubicación. El mapa sigue disponible; '
+                    'podés moverlo o volver a intentar.')
+        : (isEnglish
+              ? 'Could not load nearby reports.'
+              : 'No se pudieron cargar los reportes cercanos.');
+    final errorDetails =
+        _locationErrorMessage != null
+        ? appErrorText(context, _locationErrorMessage!)
+        : _reportsErrorMessage != null
+        ? appErrorText(context, _reportsErrorMessage!)
+        : (isEnglish ? 'Unknown error' : 'Error desconocido');
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(message),
+                  Text(
+                    errorDetails,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: locationFailed
+                  ? _initLocationAndReports
+                  : _loadNearbyReports,
+              child: Text(appText(context, 'Reintentar', 'Retry')),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -485,7 +689,7 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
                 child: InkWell(
                   borderRadius: BorderRadius.circular(28),
                   onTap: widget.onSearchTap,
-                  child: const Padding(
+                  child: Padding(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                     child: Row(
                       children: [
@@ -493,7 +697,11 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
                         SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Buscar una dirección o ruta',
+                            appText(
+                              context,
+                              'Buscar una dirección o ruta',
+                              'Search for an address or route',
+                            ),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -504,26 +712,7 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            Material(
-              elevation: 3,
-              shape: const CircleBorder(),
-              color: Theme.of(context).colorScheme.primaryContainer,
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                  );
-                },
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Icon(
-                    Icons.person,
-                    color: Theme.of(context).colorScheme.onPrimaryContainer,
-                  ),
-                ),
-              ),
-            ),
+            const UserAvatarButton(),
           ],
         ),
       ),
@@ -558,7 +747,7 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
         children: [
           FloatingActionButton.small(
             heroTag: 'layers',
-            tooltip: 'Tipo de mapa',
+            tooltip: appText(context, 'Tipo de mapa', 'Map type'),
             onPressed: _showMapTypeSheet,
             child: Icon(layersIcon),
           ),
@@ -575,6 +764,7 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
 
   Widget _buildReportButton(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     return Positioned(
       bottom: 16,
       left: 0,
@@ -595,13 +785,17 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    widget.isGuest ? Icons.push_pin_outlined : Icons.add_location_alt,
+                    widget.isGuest
+                        ? Icons.push_pin_outlined
+                        : Icons.add_location_alt,
                     color: colorScheme.onPrimary,
                     size: 20,
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    widget.isGuest ? 'Marcar' : 'Reportar',
+                    widget.isGuest
+                        ? (isEnglish ? 'Mark location' : 'Marcar')
+                        : (isEnglish ? 'Report' : 'Reportar'),
                     style: TextStyle(
                       color: colorScheme.onPrimary,
                       fontWeight: FontWeight.bold,
@@ -617,39 +811,22 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
   }
 
   Widget _buildBody() {
-    if (_isLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (_errorMessage != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(_errorMessage!, textAlign: TextAlign.center),
-              const SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: _initLocationAndReports,
-                child: const Text('Reintentar'),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     final isDark = context.watch<ThemeProvider>().isDarkMode;
     final mapType = context.watch<MapLayerProvider>().mapType;
 
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
-        initialCenter: _currentPosition!,
-        initialZoom: 15,
+        initialCenter: _mapCenter,
+        initialZoom: _currentPosition == null ? 5 : 15,
+        onMapReady: () {
+          _mapReady = true;
+          if (_currentPosition != null) {
+            _mapController.move(_currentPosition!, 15);
+          }
+        },
         onTap: (tapPosition, point) {
-          if (_currentPosition != null) _handleMapTap(point);
+          _handleMapTap(point);
         },
       ),
       children: [
@@ -657,27 +834,29 @@ class _HomeMapScreenState extends State<HomeMapScreen> {
         // Círculo visual de ${ProximityConfig.alertRadiusMeters}m alrededor
         // del usuario: es el radio dentro del cual un reporte nuevo dispara
         // una notificación.
-        CircleLayer(
-          circles: [
-            CircleMarker(
-              point: _currentPosition!,
-              radius: ProximityConfig.alertRadiusMeters,
-              useRadiusInMeter: true,
-              color: Colors.blue.withValues(alpha: 0.12),
-              borderColor: Colors.blue.withValues(alpha: 0.5),
-              borderStrokeWidth: 2,
-            ),
-          ],
-        ),
+        if (_currentPosition != null)
+          CircleLayer(
+            circles: [
+              CircleMarker(
+                point: _currentPosition!,
+                radius: ProximityConfig.alertRadiusMeters,
+                useRadiusInMeter: true,
+                color: Colors.blue.withValues(alpha: 0.12),
+                borderColor: Colors.blue.withValues(alpha: 0.5),
+                borderStrokeWidth: 2,
+              ),
+            ],
+          ),
         MarkerLayer(
           markers: [
             // Marcador de mi ubicación actual
-            Marker(
-              point: _currentPosition!,
-              width: 24,
-              height: 24,
-              child: const Icon(Icons.circle, color: Colors.blue, size: 18),
-            ),
+            if (_currentPosition != null)
+              Marker(
+                point: _currentPosition!,
+                width: 24,
+                height: 24,
+                child: const Icon(Icons.circle, color: Colors.blue, size: 18),
+              ),
             // Marcadores de los puntos de reporte
             ..._reports.map(
               (report) => Marker(

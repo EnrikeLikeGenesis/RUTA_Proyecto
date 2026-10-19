@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../providers/auth_provider.dart';
 import '../screens/settings/settings_screen.dart';
 
 /// Círculo de avatar que se ve en la barra superior del mapa y en la
@@ -9,6 +12,8 @@ class UserAvatarButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final avatarUrl =
+        context.watch<AuthProvider>().profile?['avatar_url'] as String?;
     return Material(
       elevation: 3,
       shape: const CircleBorder(),
@@ -16,13 +21,19 @@ class UserAvatarButton extends StatelessWidget {
       child: InkWell(
         customBorder: const CircleBorder(),
         onTap: () {
-          Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const SettingsScreen()),
-          );
+          Navigator.of(context)
+              .push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
         },
         child: Padding(
-          padding: const EdgeInsets.all(8.0),
-          child: Icon(Icons.person, color: colorScheme.onPrimaryContainer),
+          padding: const EdgeInsets.all(2),
+          child: CircleAvatar(
+            radius: 18,
+            backgroundColor: colorScheme.primaryContainer,
+            backgroundImage: avatarUrl == null ? null : NetworkImage(avatarUrl),
+            child: avatarUrl == null
+                ? Icon(Icons.person, color: colorScheme.onPrimaryContainer)
+                : null,
+          ),
         ),
       ),
     );

@@ -2,10 +2,14 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
+import 'package:audioplayers/audioplayers.dart';
+
 import '../../config/report_categories.dart';
+import '../../l10n/app_text.dart';
 import '../../models/report_point.dart';
 import '../../providers/map_layer_provider.dart';
 import '../../providers/theme_provider.dart';
@@ -37,8 +41,7 @@ class RouteDistanceScreen extends StatefulWidget {
 }
 
 class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
-  static const _myLocationLabel = 'Mi ubicación actual';
-  static const _routeReportRadiusMeters = 50.0;
+  static const _routeReportRadiusMeters = 80.0;
 
   final _geocodingService = GeocodingService();
   final _routingService = RoutingService();
@@ -48,6 +51,9 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
 
   final _destinoController = TextEditingController();
   final _origenController = TextEditingController();
+
+  final AudioPlayer _alertPlayer = AudioPlayer();
+  final Set<String> _alertedReports = {};
 
   Timer? _debounceDestino;
   Timer? _debounceOrigen;
@@ -68,16 +74,55 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
   List<ReportPoint>? _allReportsCache;
 
   RouteResult? _route;
+  bool _isRecommendedRoute = false;
   List<ReportPoint> _reportsOnRoute = [];
   String? _reportsOnRouteError;
   int _routeRequestId = 0;
   bool _loadingRoute = false;
   String _profile = 'driving'; // 'driving' | 'cycling' | 'walking'
+  //Boton de iniciar recorrido
+  bool _isNavigating = false;
+  StreamSubscription<Position>? _positionSubscription;
+  LatLng? _livePosition;
+
+  // Reportes que están cerca del recorrido calculado.
+  List<ReportPoint> _routeReports = [];
 
   String? _errorMessage;
 
   LatLng? _cachedCurrentPosition;
   bool _loadingInitialLocation = true;
+
+  String _routeReportSummary(BuildContext context) {
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
+    if (_isRecommendedRoute && _reportsOnRoute.isNotEmpty) {
+      return isEnglish
+          ? '${_reportsOnRoute.length} unavoidable '
+                '${_reportsOnRoute.length == 1 ? 'report' : 'reports'} on the recommended route'
+          : '${_reportsOnRoute.length} '
+                '${_reportsOnRoute.length == 1 ? 'reporte que no se pudo evitar' : 'reportes que no se pudieron evitar'} '
+                'en la ruta recomendada';
+    }
+    if (_reportsOnRoute.isEmpty) {
+      return appText(
+        context,
+        'Sin reportes en el recorrido',
+        'No reports along the route',
+      );
+    }
+    return _reportsOnRoute.length == 1
+        ? appText(
+            context,
+            '1 reporte en el recorrido',
+            '1 report along the route',
+          )
+        : (isEnglish
+              ? '${_reportsOnRoute.length} reports along the route'
+              : '${_reportsOnRoute.length} reportes en el recorrido');
+  }
+
+  String _myLocationLabel(BuildContext context) =>
+      appText(context, 'Mi ubicación actual', 'My current location');
 
   @override
   void initState() {
@@ -123,7 +168,11 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
           point.longitude,
         ) ??
         AddressSuggestion(
-          displayName: 'Punto marcado en el mapa',
+          displayName: appText(
+            context,
+            'Punto marcado en el mapa',
+            'Point marked on the map',
+          ),
           latitude: point.latitude,
           longitude: point.longitude,
         );
@@ -171,7 +220,11 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
   Future<LatLng?> _getCurrentLatLng() async {
     if (_cachedCurrentPosition != null) return _cachedCurrentPosition;
     try {
-      final position = await _locationService.getCurrentPosition();
+      final position = await _locationService.getCurrentPosition(
+        accuracy: LocationAccuracy.medium,
+        timeLimit: const Duration(seconds: 10),
+        isEnglish: Localizations.localeOf(context).languageCode == 'en',
+      );
       _cachedCurrentPosition = LatLng(position.latitude, position.longitude);
       return _cachedCurrentPosition;
     } catch (_) {
@@ -182,6 +235,26 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
   Future<List<ReportPoint>> _getAllReports() async {
     _allReportsCache ??= await _reportService.getAllReports();
     return _allReportsCache!;
+  }
+
+  // Detecta los reportes en el recorrido
+  List<ReportPoint> _findReportsAlongRoute(
+    List<LatLng> routePoints,
+    List<ReportPoint> reports,
+  ) {
+    const double distanceLimitMeters = 80;
+
+    return reports.where((report) {
+      return routePoints.any((point) {
+        final distance = const Distance().as(
+          LengthUnit.Meter,
+          point,
+          LatLng(report.latitude, report.longitude),
+        );
+
+        return distance <= distanceLimitMeters;
+      });
+    }).toList();
   }
 
   void _onChangedDestino(String value) {
@@ -256,7 +329,12 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _errorMessage = 'No se pudo buscar: $e');
+      setState(
+        () =>
+            _errorMessage = Localizations.localeOf(context).languageCode == 'en'
+            ? 'Search failed: ${appErrorText(context, e)}'
+            : 'No se pudo buscar: $e',
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -325,6 +403,8 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
       _errorMessage = null;
       _reportsOnRoute = [];
       _reportsOnRouteError = null;
+      _routeReports = [];
+      _isRecommendedRoute = false;
     });
 
     AddressSuggestion? origin = _origenPoint;
@@ -335,13 +415,17 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
         if (mounted) {
           setState(() {
             _loadingRoute = false;
-            _errorMessage = 'No se pudo obtener tu ubicación actual.';
+            _errorMessage = appText(
+              context,
+              'No se pudo obtener tu ubicación actual.',
+              'Could not get your current location.',
+            );
           });
         }
         return;
       }
       origin = AddressSuggestion(
-        displayName: _myLocationLabel,
+        displayName: _myLocationLabel(context),
         latitude: current.latitude,
         longitude: current.longitude,
       );
@@ -364,6 +448,7 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
         final reports = await _getAllReports();
         if (!mounted || requestId != _routeRequestId) return;
         setState(() {
+          _routeReports = _findReportsAlongRoute(result.points, reports);
           _reportsOnRoute = reports
               .where(
                 (report) =>
@@ -381,7 +466,12 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
       }
     } catch (e) {
       if (!mounted || requestId != _routeRequestId) return;
-      setState(() => _errorMessage = 'No se pudo calcular la ruta: $e');
+      setState(
+        () =>
+            _errorMessage = Localizations.localeOf(context).languageCode == 'en'
+            ? 'Could not calculate route: ${appErrorText(context, e)}'
+            : 'No se pudo calcular la ruta: $e',
+      );
     } finally {
       if (mounted && requestId == _routeRequestId) {
         setState(() => _loadingRoute = false);
@@ -407,8 +497,7 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
       final startY = (start.latitude - point.latitude) * latitudeScale;
       final segmentX = (end.longitude - start.longitude) * longitudeScale;
       final segmentY = (end.latitude - start.latitude) * latitudeScale;
-      final segmentLengthSquared =
-          segmentX * segmentX + segmentY * segmentY;
+      final segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
       final projection = segmentLengthSquared == 0
           ? 0.0
           : (-startX * segmentX - startY * segmentY) / segmentLengthSquared;
@@ -425,30 +514,342 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
   }
 
   void _showRouteReport(ReportPoint report) {
+    const previewLength = 160;
+    final hasLongDescription = report.description.length > previewLength;
+    var showFullReport = false;
+
     showModalBottomSheet<void>(
       context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                report.title,
-                style: Theme.of(sheetContext).textTheme.titleLarge,
-              ),
-              const SizedBox(height: 8),
-              Text(reportCategoryFor(report.category)?.label ?? report.category),
-              if (report.description.isNotEmpty) ...[
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SizedBox(
+          width: double.infinity,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(12, 20, 12, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  report.title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const SizedBox(height: 8),
-                Text(report.description),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Chip(
+                      label: Text(
+                        reportCategoryText(
+                          context,
+                          reportCategoryFor(report.category)?.label ??
+                              report.category,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      report.username ?? appText(context, 'Usuario', 'User'),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+                if (report.description.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    showFullReport || !hasLongDescription
+                        ? report.description
+                        : '${report.description.substring(0, previewLength).trimRight()}…',
+                    maxLines: showFullReport ? null : 4,
+                    overflow: showFullReport
+                        ? TextOverflow.visible
+                        : TextOverflow.ellipsis,
+                  ),
+                ],
+                if (showFullReport && report.imageUrl != null) ...[
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      report.imageUrl!,
+                      width: double.infinity,
+                      height: 260,
+                      fit: BoxFit.cover,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const SizedBox(
+                          height: 260,
+                          child: Center(child: CircularProgressIndicator()),
+                        );
+                      },
+                      errorBuilder: (_, _, _) => Container(
+                        height: 180,
+                        alignment: Alignment.center,
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
+                        child: Text(
+                          appText(
+                            context,
+                            'No se pudo cargar la imagen',
+                            'Could not load image',
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+                if (showFullReport) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    '${Localizations.localeOf(context).languageCode == 'en' ? 'Created' : 'Creado'}: ${report.createdAt.toLocal()}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () =>
+                        setSheetState(() => showFullReport = !showFullReport),
+                    child: Text(
+                      showFullReport
+                          ? appText(context, 'Ver menos', 'See less')
+                          : appText(context, 'Ver más', 'See more'),
+                    ),
+                  ),
+                ),
               ],
-            ],
+            ),
           ),
         ),
       ),
     );
+  }
+
+  //Agrega sonido si en el recorrido del gps se acerca a un reporte
+  Future<void> _playHazardAlert() async {
+    try {
+      await _alertPlayer.stop();
+      await _alertPlayer.play(AssetSource('audio/Alert.mp3'), volume: 1.0);
+    } catch (e) {
+      debugPrint('No se pudo reproducir la alerta: $e');
+    }
+  }
+
+  Future<void> _startRoute({bool useRecommendedRoute = false}) async {
+    if (_route == null || _isNavigating) return;
+
+    if (useRecommendedRoute) {
+      await _startRecommendedRoute();
+      return;
+    }
+
+    await _beginNavigation();
+  }
+
+  Future<void> _startRecommendedRoute() async {
+    final origin = _resolvedOrigin ?? _origenPoint;
+    final destination = _destinoPoint;
+    if (origin == null || destination == null) {
+      setState(() {
+        _errorMessage = appText(
+          context,
+          'No se pudo determinar el origen o el destino de la ruta.',
+          'Could not determine the route origin or destination.',
+        );
+      });
+      return;
+    }
+
+    setState(() {
+      _loadingRoute = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final reports = _allReportsCache ?? await _getAllReports();
+      if (!mounted) return;
+      final start = LatLng(origin.latitude, origin.longitude);
+      final end = LatLng(destination.latitude, destination.longitude);
+      final avoidableReports = reports.where((report) {
+        final reportPoint = LatLng(report.latitude, report.longitude);
+        final nearCurrentRoute =
+            _distanceFromPointToRoute(reportPoint, _route!.points) <= 1000;
+        final nearEndpoint =
+            const Distance().as(LengthUnit.Meter, start, reportPoint) <= 120 ||
+            const Distance().as(LengthUnit.Meter, end, reportPoint) <= 120;
+        return nearCurrentRoute && !nearEndpoint;
+      }).toList();
+      final reportsToAvoid = {
+        for (final report in avoidableReports) report.id: report,
+      };
+
+      var recommendedRoute = _route!;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        recommendedRoute = await _routingService.getRouteAvoidingPoints(
+          start: start,
+          end: end,
+          avoidPoints: reportsToAvoid.values
+              .map((report) => LatLng(report.latitude, report.longitude))
+              .toList(),
+          profile: _profile,
+        );
+        if (!mounted) return;
+
+        final remainingReports = reports.where(
+          (report) =>
+              _distanceFromPointToRoute(
+                LatLng(report.latitude, report.longitude),
+                recommendedRoute.points,
+              ) <=
+              _routeReportRadiusMeters,
+        );
+        var addedAvoidancePoint = false;
+        for (final report in remainingReports) {
+          final nearEndpoint =
+              const Distance().as(
+                    LengthUnit.Meter,
+                    start,
+                    LatLng(report.latitude, report.longitude),
+                  ) <=
+                  120 ||
+              const Distance().as(
+                    LengthUnit.Meter,
+                    end,
+                    LatLng(report.latitude, report.longitude),
+                  ) <=
+                  120;
+          if (!nearEndpoint && !reportsToAvoid.containsKey(report.id)) {
+            reportsToAvoid[report.id] = report;
+            addedAvoidancePoint = true;
+          }
+        }
+        if (!addedAvoidancePoint || attempt == 2) break;
+      }
+
+      setState(() {
+        _route = recommendedRoute;
+        _isRecommendedRoute = true;
+        _routeReports = _findReportsAlongRoute(
+          recommendedRoute.points,
+          reports,
+        );
+        _reportsOnRoute = reports
+            .where(
+              (report) =>
+                  _distanceFromPointToRoute(
+                    LatLng(report.latitude, report.longitude),
+                    recommendedRoute.points,
+                  ) <=
+                  _routeReportRadiusMeters,
+            )
+            .toList();
+      });
+      _fitMapToPoints(origin, destination);
+      await _beginNavigation();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = Localizations.localeOf(context).languageCode == 'en'
+            ? 'Could not calculate recommended route: ${appErrorText(context, e)}'
+            : 'No se pudo calcular la ruta recomendada: $e';
+      });
+    } finally {
+      if (mounted) setState(() => _loadingRoute = false);
+    }
+  }
+
+  Future<void> _beginNavigation() async {
+    if (_route == null || _isNavigating) return;
+
+    try {
+      // Comprueba que el GPS esté habilitado y tenga permisos.
+      final position = await _locationService.getCurrentPosition(
+        accuracy: LocationAccuracy.high,
+        isEnglish: Localizations.localeOf(context).languageCode == 'en',
+      );
+
+      if (!mounted) return;
+
+      //reiniciar las alertas al iniciar un recorrido nuevo
+      _alertedReports.clear();
+
+      setState(() {
+        _isNavigating = true;
+        _livePosition = LatLng(position.latitude, position.longitude);
+        _errorMessage = null;
+      });
+
+      // Actualiza la ubicación durante el recorrido.
+      _positionSubscription = _locationService.watchPosition().listen((
+        position,
+      ) {
+        if (!mounted) return;
+
+        final currentPosition = LatLng(position.latitude, position.longitude);
+
+        setState(() {
+          _livePosition = currentPosition;
+        });
+
+        _mapController.move(currentPosition, 16);
+
+        const double alertDistanceMeters = 100;
+        const distanceCalculator = Distance();
+
+        for (final report in _routeReports) {
+          final reportPosition = LatLng(report.latitude, report.longitude);
+
+          final meters = distanceCalculator.as(
+            LengthUnit.Meter,
+            currentPosition,
+            reportPosition,
+          );
+
+          final reportKey =
+              '${report.latitude}_${report.longitude}_${report.title}';
+
+          if (meters <= alertDistanceMeters &&
+              !_alertedReports.contains(reportKey)) {
+            _alertedReports.add(reportKey);
+
+            _playHazardAlert();
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  Localizations.localeOf(context).languageCode == 'en'
+                      ? 'Warning! ${report.title} within 100 meters.'
+                      : '¡Atención! ${report.title} a menos de 100 metros.',
+                ),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _errorMessage = Localizations.localeOf(context).languageCode == 'en'
+            ? 'Could not start navigation: ${appErrorText(context, e)}'
+            : 'No se pudo iniciar el recorrido: $e';
+      });
+    }
+  }
+
+  Future<void> _stopRoute() async {
+    await _positionSubscription?.cancel();
+    _positionSubscription = null;
+
+    if (!mounted) return;
+
+    setState(() {
+      _isNavigating = false;
+    });
   }
 
   void _onProfileChanged(String profile) {
@@ -507,11 +908,9 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Column(
+        child: _isNavigating
+            ? _buildNavigationView()
+            : Column(
                 children: [
                   _buildDestinoField(),
                   const SizedBox(height: 6),
@@ -531,20 +930,20 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
                   ],
                   const SizedBox(height: 10),
                   SegmentedButton<String>(
-                    segments: const [
+                    segments: [
                       ButtonSegment(
                         value: 'driving',
-                        label: Text('Auto'),
+                        label: Text(appText(context, 'Auto', 'Car')),
                         icon: Icon(Icons.directions_car),
                       ),
                       ButtonSegment(
                         value: 'cycling',
-                        label: Text('Bici'),
+                        label: Text(appText(context, 'Bici', 'Bike')),
                         icon: Icon(Icons.directions_bike),
                       ),
                       ButtonSegment(
                         value: 'walking',
-                        label: Text('Caminando'),
+                        label: Text(appText(context, 'Caminando', 'Walking')),
                         icon: Icon(Icons.directions_walk),
                       ),
                     ],
@@ -556,8 +955,12 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
                     const SizedBox(height: 16),
                     const CircularProgressIndicator(),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Calculando ruta...',
+                    Text(
+                      appText(
+                        context,
+                        'Calculando ruta...',
+                        'Calculating route...',
+                      ),
                       style: TextStyle(color: Colors.grey),
                     ),
                   ],
@@ -573,16 +976,7 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
                       child: Column(
                         children: [
                           Text(
-                            'Desde ${_resolvedOrigin?.displayName ?? _myLocationLabel}',
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          const Text(
-                            'Distancia recorriendo calles',
+                            appText(context, 'Distancia', 'Distance'),
                             style: TextStyle(fontSize: 13, color: Colors.grey),
                           ),
                           const SizedBox(height: 4),
@@ -604,10 +998,12 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
                           const SizedBox(height: 8),
                           Text(
                             _reportsOnRouteError == null
-                                ? _reportsOnRoute.length == 1
-                                    ? '1 reporte en el recorrido'
-                                    : '${_reportsOnRoute.length} reportes en el recorrido'
-                                : 'No se pudieron cargar los reportes: $_reportsOnRouteError',
+                                ? _routeReportSummary(context)
+                                : (Localizations.localeOf(context)
+                                              .languageCode ==
+                                          'en'
+                                      ? 'Could not load reports: ${appErrorText(context, _reportsOnRouteError!)}'
+                                      : 'No se pudieron cargar los reportes: $_reportsOnRouteError'),
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               fontSize: 12,
@@ -619,15 +1015,185 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
                         ],
                       ),
                     ),
+                    const SizedBox(height: 8),
+                    if (_reportsOnRoute.isNotEmpty)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () => _startRoute(),
+                              style: FilledButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                              ),
+                              child: Text(
+                                appText(
+                                  context,
+                                  'Usar esta ruta',
+                                  'Use this route',
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () =>
+                                  _startRoute(useRecommendedRoute: true),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                              ),
+                              child: Text(
+                                appText(
+                                  context,
+                                  'Ruta recomendada',
+                                  'Recommended route',
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _startRoute,
+                          icon: const Icon(Icons.navigation),
+                          label: Text(
+                            appText(
+                              context,
+                              'Iniciar recorrido',
+                              'Start navigation',
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                   const SizedBox(height: 10),
+                  Expanded(child: _buildMap()),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildNavigationView() {
+    return Stack(
+      children: [
+        // El mapa ocupa toda la pantalla.
+        Positioned.fill(child: _buildMap()),
+
+        // Información del recorrido en la parte superior.
+        Positioned(
+          top: 12,
+          left: 12,
+          right: 12,
+          child: Card(
+            elevation: 5,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const Icon(Icons.navigation, color: Colors.blue, size: 30),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          appText(
+                            context,
+                            'Recorrido en curso',
+                            'Navigation in progress',
+                          ),
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${appText(context, 'Destino', 'Destination')}: ${_destinoPoint?.displayName ?? appText(context, 'No definido', 'Not set')}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (_route != null)
+                          Text(
+                            '${_formatKm(_route!.distanceKm)} · '
+                            '≈ ${_formatDuration(_route!.durationMinutes)}',
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 13,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
-            Expanded(child: _buildMap()),
-          ],
+          ),
         ),
-      ),
+
+        // Aviso de error, si el GPS falla.
+        if (_errorMessage != null)
+          Positioned(
+            top: 115,
+            left: 12,
+            right: 12,
+            child: Card(
+              color: Colors.red.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Text(
+                  _errorMessage!,
+                  style: TextStyle(color: Colors.red.shade900),
+                ),
+              ),
+            ),
+          ),
+
+        // Botón para terminar la navegación.
+        Positioned(
+          left: 16,
+          right: 16,
+          bottom: 16,
+          child: SafeArea(
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _stopRoute,
+                icon: const Icon(Icons.stop_circle_outlined),
+                label: Text(
+                  appText(context, 'Finalizar recorrido', 'End navigation'),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -644,8 +1210,12 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
             onChanged: _onChangedDestino,
             decoration: InputDecoration(
               hintText: _searchMode == _SearchMode.calle
-                  ? '¿A dónde vamos?'
-                  : 'Buscar un reporte...',
+                  ? appText(context, '¿A dónde vamos?', 'Where are you going?')
+                  : appText(
+                      context,
+                      'Buscar un reporte...',
+                      'Search reports...',
+                    ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(28),
                 borderSide: BorderSide.none,
@@ -696,15 +1266,23 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
         Expanded(
           child: Text(
             _showOrigenField
-                ? 'Elegí tu punto de partida'
-                : 'Desde: $_myLocationLabel',
+                ? appText(
+                    context,
+                    'Elegí tu punto de partida',
+                    'Choose a starting point',
+                  )
+                : '${appText(context, 'From', 'Desde')}: ${_myLocationLabel(context)}',
             style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
             overflow: TextOverflow.ellipsis,
           ),
         ),
         TextButton(
           onPressed: _toggleOrigenField,
-          child: Text(_showOrigenField ? 'Usar mi ubicación' : 'Cambiar'),
+          child: Text(
+            _showOrigenField
+                ? appText(context, 'Usar mi ubicación', 'Use my location')
+                : appText(context, 'Cambiar', 'Change'),
+          ),
         ),
       ],
     );
@@ -718,8 +1296,12 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
           controller: _origenController,
           onChanged: _onChangedOrigen,
           decoration: InputDecoration(
-            labelText: 'Punto de partida',
-            hintText: 'Buscá una calle o dirección...',
+            labelText: appText(context, 'Punto de partida', 'Starting point'),
+            hintText: appText(
+              context,
+              'Buscá una calle o dirección...',
+              'Search for a street or address...',
+            ),
             border: const OutlineInputBorder(),
             suffixIcon: _searchingOrigen
                 ? const Padding(
@@ -798,7 +1380,7 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
           Padding(
             padding: const EdgeInsets.only(bottom: 4),
             child: Text(
-              'Recientes',
+              appText(context, 'Recientes', 'Recent'),
               style: Theme.of(context).textTheme.labelLarge,
             ),
           ),
@@ -824,13 +1406,13 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
     return Row(
       children: [
         ChoiceChip(
-          label: const Text('Calle'),
+          label: Text(appText(context, 'Calle', 'Address')),
           selected: _searchMode == _SearchMode.calle,
           onSelected: (_) => _onSearchModeChanged(_SearchMode.calle),
         ),
         const SizedBox(width: 8),
         ChoiceChip(
-          label: const Text('Reporte'),
+          label: Text(appText(context, 'Reporte', 'Report')),
           selected: _searchMode == _SearchMode.reporte,
           onSelected: (_) => _onSearchModeChanged(_SearchMode.reporte),
         ),
@@ -845,17 +1427,35 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    //Corregir mapa cuando no hay ubicacion
+    if (_cachedCurrentPosition == null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+            appText(
+              context,
+              'No se pudo obtener tu ubicación. Activá el GPS y revisá los permisos.',
+              'Could not get your location. Turn on GPS and check permissions.',
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+
     final origin = _resolvedOrigin ?? _origenPoint;
+    final hazardReportIds = _routeReports.map((report) => report.id).toSet();
     final markers = <Marker>[
       if (_route != null)
-        ..._reportsOnRoute.map(
+        ...?_allReportsCache?.map(
           (report) => Marker(
             point: LatLng(report.latitude, report.longitude),
-            width: 40,
-            height: 40,
-            child: GestureDetector(
-              onTap: () => _showRouteReport(report),
-              child: _routeReportMarker(report.category),
+            width: 56,
+            height: 56,
+            child: _buildRouteReportMarker(
+              report,
+              isHazard: hazardReportIds.contains(report.id),
             ),
           ),
         ),
@@ -873,10 +1473,21 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
           height: 40,
           child: const Icon(Icons.location_on, color: Colors.red, size: 36),
         ),
+
+      // muestra la ubicación actual en el mapa
+      if (_isNavigating && _livePosition != null)
+        Marker(
+          point: _livePosition!,
+          width: 48,
+          height: 48,
+          child: const Icon(Icons.navigation, color: Colors.blue, size: 38),
+        ),
     ];
 
     final isDark = context.watch<ThemeProvider>().isDarkMode;
     final mapType = context.watch<MapLayerProvider>().mapType;
+
+    //
 
     return FlutterMap(
       mapController: _mapController,
@@ -915,12 +1526,61 @@ class _RouteDistanceScreenState extends State<RouteDistanceScreen> {
     );
   }
 
+  Widget _buildRouteReportMarker(ReportPoint report, {required bool isHazard}) {
+    return Semantics(
+      button: true,
+      label: isHazard
+          ? (Localizations.localeOf(context).languageCode == 'en'
+                ? '${report.title}, hazard report near route'
+                : '${report.title}, reporte de peligro cerca de la ruta')
+          : report.title,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _showRouteReport(report),
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            SizedBox(
+              width: 48,
+              height: 48,
+              child: _routeReportMarker(report.category),
+            ),
+            if (isHazard)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: IgnorePointer(
+                  child: Container(
+                    width: 23,
+                    height: 23,
+                    decoration: BoxDecoration(
+                      color: Colors.deepOrange,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    child: const Icon(
+                      Icons.warning_rounded,
+                      color: Colors.white,
+                      size: 15,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _debounceDestino?.cancel();
     _debounceOrigen?.cancel();
+    _positionSubscription?.cancel();
     _destinoController.dispose();
     _origenController.dispose();
+    _alertPlayer.dispose();
     super.dispose();
   }
 }

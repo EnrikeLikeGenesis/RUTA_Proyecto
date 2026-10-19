@@ -10,6 +10,7 @@ class AuthProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
   bool _isGuest = false;
+  int _profileLoadGeneration = 0;
 
   AuthProvider() {
     _user = _authService.currentUser;
@@ -17,12 +18,15 @@ class AuthProvider extends ChangeNotifier {
       _user = state.session?.user;
       if (_user != null) {
         _isGuest = false;
+        _profile = null;
         _loadProfile();
       } else {
         _profile = null;
+        _isGuest = false;
       }
       notifyListeners();
     });
+    if (_user != null) _loadProfile();
   }
 
   User? get user => _user;
@@ -49,8 +53,13 @@ class AuthProvider extends ChangeNotifier {
   }
 
   Future<void> _loadProfile() async {
-    if (_user == null) return;
-    _profile = await _authService.getProfile(_user!.id);
+    final userId = _user?.id;
+    if (userId == null) return;
+    final generation = ++_profileLoadGeneration;
+    final profile = await _authService.getProfile(userId);
+    if (_user?.id != userId || generation != _profileLoadGeneration) return;
+    _profile = profile;
+    notifyListeners();
   }
 
   Future<bool> signUp(
@@ -111,5 +120,40 @@ class AuthProvider extends ChangeNotifier {
     await _authService.updateUsername(_user!.id, newUsername);
     await _loadProfile();
     notifyListeners();
+  }
+
+  Future<void> updatePersonalDetails({
+    required String firstName,
+    required String lastName,
+    required String email,
+    required String phoneNumber,
+  }) async {
+    final userId = _user?.id;
+    if (userId == null) throw StateError('No hay una sesión activa.');
+    await _authService.updatePersonalDetails(
+      userId: userId,
+      firstName: firstName,
+      lastName: lastName,
+      email: email,
+      phoneNumber: phoneNumber,
+    );
+    await _loadProfile();
+  }
+
+  Future<void> updateProfileImage({
+    required Uint8List bytes,
+    required String fileExtension,
+    String? contentType,
+  }) async {
+    final userId = _user?.id;
+    if (userId == null) throw StateError('No hay una sesión activa.');
+    final imageUrl = await _authService.uploadProfileImage(
+      userId: userId,
+      bytes: bytes,
+      fileExtension: fileExtension,
+      contentType: contentType,
+    );
+    await _authService.updateProfileImage(userId, imageUrl);
+    await _loadProfile();
   }
 }

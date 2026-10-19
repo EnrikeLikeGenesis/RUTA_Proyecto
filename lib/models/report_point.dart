@@ -7,6 +7,7 @@ class ReportPoint {
   final double latitude;
   final double longitude;
   final DateTime createdAt;
+  final String? imageUrl;
 
   /// Nombre de usuario de quien creó el reporte (viene de la tabla
   /// "profiles" a través del join en ReportService). Puede ser null si
@@ -22,6 +23,7 @@ class ReportPoint {
     required this.latitude,
     required this.longitude,
     required this.createdAt,
+    this.imageUrl,
     this.username,
   });
 
@@ -39,6 +41,7 @@ class ReportPoint {
       latitude: (map['latitude'] as num).toDouble(),
       longitude: (map['longitude'] as num).toDouble(),
       createdAt: DateTime.parse(map['created_at'] as String),
+      imageUrl: map['image_url'] as String?,
       username: profile?['username'] as String?,
     );
   }
@@ -51,6 +54,7 @@ class ReportPoint {
       'category': category,
       'latitude': latitude,
       'longitude': longitude,
+      'image_url': imageUrl,
     };
   }
 }

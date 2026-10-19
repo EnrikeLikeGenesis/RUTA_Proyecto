@@ -11,6 +11,7 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+  Future<void>? _initialization;
 
   static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
     'nearby_reports',
@@ -18,12 +19,27 @@ class NotificationService {
     description: 'Avisa cuando se crea un reporte dentro de tu radio.',
     importance: Importance.high,
   );
+  static const AndroidNotificationChannel _englishChannel =
+      AndroidNotificationChannel(
+        'nearby_reports_en',
+        'Nearby reports',
+        description: 'Alerts when a report is created near you.',
+        importance: Importance.high,
+      );
 
-  /// Inicializa el plugin y pide permiso de notificaciones al sistema
-  /// operativo (Android 13+ / iOS). Se llama una sola vez, desde main().
+  /// Inicializa el plugin sin bloquear el arranque ni solicitar permisos.
   Future<void> init() async {
     if (_initialized) return;
+    final initialization = _initialization ??= _initialize();
+    try {
+      await initialization;
+    } catch (_) {
+      _initialization = null;
+      rethrow;
+    }
+  }
 
+  Future<void> _initialize() async {
     const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: false,
@@ -35,38 +51,48 @@ class NotificationService {
       const InitializationSettings(android: androidSettings, iOS: iosSettings),
     );
 
-    await _plugin
+    final androidPlugin = _plugin
         .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(_channel);
-
-    await _plugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-
-    await _plugin
-        .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(alert: true, badge: true, sound: true);
+            AndroidFlutterLocalNotificationsPlugin>();
+    await androidPlugin?.createNotificationChannel(_channel);
+    await androidPlugin?.createNotificationChannel(_englishChannel);
 
     _initialized = true;
   }
 
-  /// Muestra la notificación de "se creó un reporte cerca tuyo".
+  /// Requests OS permission only after the user enables community alerts.
+  Future<bool> requestPermissions() async {
+    await init();
+    final androidGranted = await _plugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+
+    final iosGranted = await _plugin
+        .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin>()
+        ?.requestPermissions(alert: true, badge: true, sound: true);
+
+    return androidGranted ?? iosGranted ?? true;
+  }
+
+  /// Shows a nearby community report notification if OS permission exists.
   Future<void> showNearbyReportNotification({
     required String title,
     required String body,
+    bool isEnglish = false,
   }) async {
+    await init();
+    final channel = isEnglish ? _englishChannel : _channel;
     await _plugin.show(
-      DateTime.now().millisecondsSinceEpoch ~/ 1000, // id único simple
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
       title,
       body,
       NotificationDetails(
         android: AndroidNotificationDetails(
-          _channel.id,
-          _channel.name,
-          channelDescription: _channel.description,
+          channel.id,
+          channel.name,
+          channelDescription: channel.description,
           importance: Importance.high,
           priority: Priority.high,
           icon: '@mipmap/ic_launcher',

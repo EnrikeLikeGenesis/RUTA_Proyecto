@@ -1,16 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
+
+import '../l10n/app_text.dart';
 import 'comunidad/comunidad_screen.dart';
 import 'home/home_map_screen.dart';
 import 'route/route_distance_screen.dart';
 
-/// Pantalla principal luego de entrar (logueado o invitado): agrupa las
-/// tres secciones de la app en una barra de navegación inferior.
+/// Pantalla principal con comunidad y mapa; el buscador de rutas se abre
+/// como una capa sobre el mapa.
 class MainNavigationScreen extends StatefulWidget {
   final String? userId;
   final bool isGuest;
 
-  const MainNavigationScreen({super.key, required this.userId, this.isGuest = false});
+  const MainNavigationScreen({
+    super.key,
+    required this.userId,
+    this.isGuest = false,
+  });
 
   @override
   State<MainNavigationScreen> createState() => _MainNavigationScreenState();
@@ -19,63 +25,95 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   static const _mapaIndex = 1;
   int _index = _mapaIndex;
+  bool _communityVisited = false;
+  bool _showRouteOverlay = false;
 
-  /// Punto y propósito seleccionados desde el mapa, pendientes de usarse
-  /// en la pestaña "Rutas".
+  /// Punto y propósito seleccionados desde el mapa para calcular un recorrido.
   LatLng? _markedPoint;
   bool _markedPointAsDestination = true;
   int _markedPointVersion = 0;
 
-  void _goToTab(int index) => setState(() => _index = index);
+  void _goToTab(int index) {
+    setState(() {
+      _index = index;
+      if (index == 0) _communityVisited = true;
+      if (index != _mapaIndex) {
+        _showRouteOverlay = false;
+        _markedPoint = null;
+      }
+    });
+  }
 
-  void _onMapPointMarked(LatLng point, bool asDestination) {
+  void _showRoutes({LatLng? point, bool asDestination = true}) {
     setState(() {
       _markedPoint = point;
       _markedPointAsDestination = asDestination;
       _markedPointVersion++;
-      _index = 2;
+      _showRouteOverlay = true;
+      _index = _mapaIndex;
+    });
+  }
+
+  void _onMapPointMarked(LatLng point, bool asDestination) {
+    _showRoutes(point: point, asDestination: asDestination);
+  }
+
+  void _closeRouteOverlay() {
+    setState(() {
+      _showRouteOverlay = false;
+      _markedPoint = null;
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final tabs = [
-      ComunidadScreen(currentUserId: widget.userId),
+      _communityVisited
+          ? ComunidadScreen(currentUserId: widget.userId)
+          : const SizedBox.shrink(),
       HomeMapScreen(
         userId: widget.userId,
         isGuest: widget.isGuest,
-        onSearchTap: () => _goToTab(2),
+        onSearchTap: _showRoutes,
         onMapPointMarked: _onMapPointMarked,
-      ),
-      RouteDistanceScreen(
-        key: ValueKey('route-$_markedPointVersion'),
-        initialMarkedPoint: _markedPoint,
-        initialMarkedPointAsDestination: _markedPointAsDestination,
       ),
     ];
 
-    return Scaffold(
-      body: IndexedStack(index: _index, children: tabs),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: _goToTab,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.groups_outlined),
-            selectedIcon: Icon(Icons.groups),
-            label: 'Comunidad',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.map_outlined),
-            selectedIcon: Icon(Icons.map),
-            label: 'Mapa',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.alt_route_outlined),
-            selectedIcon: Icon(Icons.alt_route),
-            label: 'Rutas',
-          ),
-        ],
+    return PopScope<Object?>(
+      canPop: !_showRouteOverlay,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _showRouteOverlay) _closeRouteOverlay();
+      },
+      child: Scaffold(
+        body: Stack(
+          children: [
+            IndexedStack(index: _index, children: tabs),
+            if (_showRouteOverlay)
+              Positioned.fill(
+                child: RouteDistanceScreen(
+                  key: ValueKey('route-$_markedPointVersion'),
+                  initialMarkedPoint: _markedPoint,
+                  initialMarkedPointAsDestination: _markedPointAsDestination,
+                ),
+              ),
+          ],
+        ),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _index,
+          onDestinationSelected: _goToTab,
+          destinations: [
+            NavigationDestination(
+              icon: const Icon(Icons.groups_outlined),
+              selectedIcon: const Icon(Icons.groups),
+              label: appText(context, 'Comunidad', 'Community'),
+            ),
+            NavigationDestination(
+              icon: const Icon(Icons.map_outlined),
+              selectedIcon: const Icon(Icons.map),
+              label: appText(context, 'Mapa', 'Map'),
+            ),
+          ],
+        ),
       ),
     );
   }
